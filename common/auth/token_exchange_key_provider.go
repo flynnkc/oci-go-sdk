@@ -5,8 +5,6 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"sync"
-
-	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
 const (
@@ -19,24 +17,63 @@ const (
 type TokenType string
 
 type TokenExchangeKeyProvider struct {
-	GetJWT     func(...interface{}) (*jwtToken, error)
-	region     string
-	privateKey *rsa.PrivateKey
-	token      *jwtToken
-	sync.Mutex
+	federationClient federationClient
+	region           string
+	privateKey       *rsa.PrivateKey
 }
 
+// PrivateRSAKey provides the required receiver for the KeyProvider interface
 func (t *TokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
 	return t.privateKey, nil
 }
 
+// KeyID provides the required receiver for the KeyProvider interface
 func (t *TokenExchangeKeyProvider) KeyID() (string, error) {
-	return fmt.Sprintf("ST$%s", t.token.raw), nil
+	securityToken, err := t.federationClient.SecurityToken()
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("ST$%s", securityToken), nil
 }
 
-func (t *TokenExchangeKeyProvider) RefreshRSAKey() error {
-	t.Lock()
-	defer t.Unlock()
+// tokenExchangeFederationClient implements federationClient
+type tokenExchangeFederationClient struct {
+	securityToken    securityToken
+	privateKey       *rsa.PrivateKey
+	refreshTokenFunc func(...interface{}) (string, error)
+	args             []interface{}
+	mux              sync.Mutex
+}
+
+// PrivateKey receiver implements federationClient interface
+func (t *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
+
+	return nil, nil
+}
+
+// SecurityToken receiver implements federationClient interface
+func (t *tokenExchangeFederationClient) SecurityToken() (string, error) {
+	if err := t.renewSecurityTokenIfNotValid(); err != nil {
+		return "", err
+	}
+
+	return t.securityToken.String(), nil
+}
+
+func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
+	if t.securityToken == nil || !t.securityToken.Valid() {
+		if err := t.renewSecurityToken(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (t *tokenExchangeFederationClient) renewSecurityToken() error {
+	t.mux.Lock()
+	defer t.mux.Unlock()
 
 	// Generate private key using rand.Reader for getting secure randomness from
 	// underlying operating system (e.g. /dev/urandom or getrandom())
@@ -46,27 +83,49 @@ func (t *TokenExchangeKeyProvider) RefreshRSAKey() error {
 	}
 
 	t.privateKey = privateKey
+
+	token, err := t.refreshTokenFunc(t.args...)
+	if err != nil {
+		return err
+	}
+
+	parsedToken, err := parseJwt(token)
+	if err != nil {
+		return err
+	}
+
+	t.securityToken = &tokenExchangeToken{token: *parsedToken}
+
 	return nil
 }
 
-func staticKeyProvider(jwt string) (common.KeyProvider, error) {
-	token, err := parseJwt(jwt)
-	if err != nil {
-		return nil, err
+type tokenExchangeToken struct {
+	token jwtToken
+}
+
+// String implements fmt.Stringer
+func (t *tokenExchangeToken) String() string {
+	return t.token.raw
+}
+
+// Valid implements the securityToken interface
+func (t *tokenExchangeToken) Valid() bool {
+	return !t.token.expired()
+}
+
+// GetClaim implements the ClaimHolder interface
+func (t *tokenExchangeToken) GetClaim(key string) (interface{}, error) {
+
+	// Per RFC7519 parsers should return only the lexically last member in the case
+	// of duplicate claim names. We check payload first and return if claim found
+	// and check header only if claim is not found in payload.
+	if claim, ok := t.token.payload[key]; ok {
+		return claim, nil
 	}
 
-	kp := &TokenExchangeKeyProvider{
-		GetJWT: func(i ...interface{}) (*jwtToken, error) {
-			return token, nil
-		},
-		token: token,
+	if claim, ok := t.token.header[key]; ok {
+		return claim, nil
 	}
 
-	// Generate rsa.PrivateKey
-	err = kp.RefreshRSAKey()
-	if err != nil {
-		return nil, err
-	}
-
-	return kp, nil
+	return nil, ErrNoSuchClaim
 }
