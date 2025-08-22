@@ -48,8 +48,11 @@ type tokenExchangeFederationClient struct {
 
 // PrivateKey receiver implements federationClient interface
 func (t *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
+	if err := t.renewSecurityTokenIfNotValid(); err != nil {
+		return nil, err
+	}
 
-	return nil, nil
+	return t.privateKey, nil
 }
 
 // SecurityToken receiver implements federationClient interface
