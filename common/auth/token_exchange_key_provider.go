@@ -16,19 +16,20 @@ const (
 
 type TokenType string
 
-type TokenExchangeKeyProvider struct {
+// tokenExchangeKeyProvider implements KeyProvider
+type tokenExchangeKeyProvider struct {
 	federationClient federationClient
 	region           string
 	privateKey       *rsa.PrivateKey
 }
 
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
-func (t *TokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
+func (t *tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
 	return t.privateKey, nil
 }
 
 // KeyID provides the required receiver for the KeyProvider interface
-func (t *TokenExchangeKeyProvider) KeyID() (string, error) {
+func (t *tokenExchangeKeyProvider) KeyID() (string, error) {
 	securityToken, err := t.federationClient.SecurityToken()
 	if err != nil {
 		return "", err
@@ -66,9 +67,7 @@ func (t *tokenExchangeFederationClient) SecurityToken() (string, error) {
 
 func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	if t.securityToken == nil || !t.securityToken.Valid() {
-		if err := t.renewSecurityToken(); err != nil {
-			return err
-		}
+		return t.renewSecurityToken()
 	}
 
 	return nil
@@ -85,19 +84,18 @@ func (t *tokenExchangeFederationClient) renewSecurityToken() error {
 		return err
 	}
 
+	jwt, err := t.refreshTokenFunc(t.args...)
+	if err != nil {
+		return err
+	}
+
+	token, err := newTokenExchangeToken(jwt, privateKey)
+	if err != nil {
+		return err
+	}
+
 	t.privateKey = privateKey
-
-	token, err := t.refreshTokenFunc(t.args...)
-	if err != nil {
-		return err
-	}
-
-	parsedToken, err := parseJwt(token)
-	if err != nil {
-		return err
-	}
-
-	t.securityToken = &tokenExchangeToken{token: *parsedToken}
+	t.securityToken = token
 
 	return nil
 }
@@ -106,18 +104,28 @@ type tokenExchangeToken struct {
 	token jwtToken
 }
 
+func newTokenExchangeToken(jwt string,
+	privateKey *rsa.PrivateKey) (tokenExchangeToken, error) {
+
+	var token = tokenExchangeToken{}
+
+	// Need to insert things here
+
+	return token, nil
+}
+
 // String implements fmt.Stringer
-func (t *tokenExchangeToken) String() string {
+func (t tokenExchangeToken) String() string {
 	return t.token.raw
 }
 
 // Valid implements the securityToken interface
-func (t *tokenExchangeToken) Valid() bool {
+func (t tokenExchangeToken) Valid() bool {
 	return !t.token.expired()
 }
 
 // GetClaim implements the ClaimHolder interface
-func (t *tokenExchangeToken) GetClaim(key string) (interface{}, error) {
+func (t tokenExchangeToken) GetClaim(key string) (interface{}, error) {
 
 	// Per RFC7519 parsers should return only the lexically last member in the case
 	// of duplicate claim names. We check payload first and return if claim found
