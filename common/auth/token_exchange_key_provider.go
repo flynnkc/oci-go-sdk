@@ -3,33 +3,62 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+
+	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
 const (
-	subTokenSpnego        TokenType = "spnego"
-	subTokenJwt           TokenType = "jwt"
-	subTokenSaml          TokenType = "saml"
-	subTokenAwsCredential TokenType = "aws-credential"
+	//	subTokenSpnego         string = "spnego"
+	//	subTokenSaml           string = "saml"
+	//	subTokenAwsCredential  string = "aws-credential"
+	subTokenJwt            string = "jwt"
+	tokenExchangeGrantType string = "grant_type=urn:ietf:params:oauth:grant-type:token-exchange"
+	requestedTokenType     string = "requested_token_type=urn:oci:token-type:oci-upst"
 )
 
-type TokenType string
+// JwtFunc is a variadic function that returns a JWT from a registered Identity
+// Propagation Trust in string format and an error
+type JwtFunc func(...interface{}) (string, error)
 
 // tokenExchangeKeyProvider implements KeyProvider
 type tokenExchangeKeyProvider struct {
 	federationClient federationClient
-	region           string
+	region           common.Region
 	privateKey       *rsa.PrivateKey
 }
 
+func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
+	region common.Region, tokenFunc JwtFunc) (common.KeyProvider, error) {
+	fc := &tokenExchangeFederationClient{
+		domainUrl:        domainUrl,
+		refreshTokenFunc: tokenFunc,
+		authCode: base64.StdEncoding.EncodeToString([]byte(
+			clientId + ":" + clientSecret)),
+	}
+
+	kp := tokenExchangeKeyProvider{
+		region:           region,
+		federationClient: fc,
+	}
+
+	return kp, nil
+}
+
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
-func (t *tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
+func (t tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
 	return t.privateKey, nil
 }
 
 // KeyID provides the required receiver for the KeyProvider interface
-func (t *tokenExchangeKeyProvider) KeyID() (string, error) {
+func (t tokenExchangeKeyProvider) KeyID() (string, error) {
 	securityToken, err := t.federationClient.SecurityToken()
 	if err != nil {
 		return "", err
@@ -42,8 +71,10 @@ func (t *tokenExchangeKeyProvider) KeyID() (string, error) {
 type tokenExchangeFederationClient struct {
 	securityToken    securityToken
 	privateKey       *rsa.PrivateKey
-	refreshTokenFunc func(...interface{}) (string, error)
+	refreshTokenFunc JwtFunc
 	args             []interface{}
+	domainUrl        string
+	authCode         string
 	mux              sync.Mutex
 }
 
@@ -65,6 +96,10 @@ func (t *tokenExchangeFederationClient) SecurityToken() (string, error) {
 	return t.securityToken.String(), nil
 }
 
+func (t *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error) {
+	return t.securityToken.GetClaim(key)
+}
+
 func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	if t.securityToken == nil || !t.securityToken.Valid() {
 		return t.renewSecurityToken()
@@ -84,12 +119,17 @@ func (t *tokenExchangeFederationClient) renewSecurityToken() error {
 		return err
 	}
 
+	publicKey, err := privateToPublicString(privateKey)
+	if err != nil {
+		return err
+	}
+
 	jwt, err := t.refreshTokenFunc(t.args...)
 	if err != nil {
 		return err
 	}
 
-	token, err := newTokenExchangeToken(jwt, privateKey)
+	token, err := newTokenExchangeToken(jwt, publicKey, t.domainUrl, t.authCode)
 	if err != nil {
 		return err
 	}
@@ -104,14 +144,54 @@ type tokenExchangeToken struct {
 	token jwtToken
 }
 
-func newTokenExchangeToken(jwt string,
-	privateKey *rsa.PrivateKey) (tokenExchangeToken, error) {
+func newTokenExchangeToken(jwt, publicKey, host, authCode string) (tokenExchangeToken, error) {
+	var t = tokenExchangeToken{}
 
-	var token = tokenExchangeToken{}
+	data := url.Values{
+		"requested_token_type": {requestedTokenType},
+		"grant_type":           {tokenExchangeGrantType},
+		"public_key":           {publicKey},
+		"subject_token_type":   {subTokenJwt},
+		"subject_token":        {jwt},
+	}
 
-	// Need to insert things here
+	request, err := http.NewRequest(http.MethodPost, host, strings.NewReader(data.Encode()))
+	if err != nil {
+		return t, err
+	}
 
-	return token, nil
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Authorization", "Basic "+authCode)
+
+	client := &http.Client{}
+	r, err := client.Do(request)
+	if err != nil {
+		return t, err
+	}
+	defer r.Body.Close()
+
+	if r.StatusCode != http.StatusOK {
+		return t, fmt.Errorf("invalid token endpoint response %s", r.Status)
+	}
+
+	var response map[string]interface{}
+	if err = json.NewDecoder(r.Body).Decode(&response); err != nil {
+		return t, fmt.Errorf("unable to unmarshal response: %s", err)
+	}
+
+	token, ok := response["token"].(string)
+	if !ok {
+		return t, fmt.Errorf("unable to unmarshal response: %s", err)
+	}
+
+	parsedToken, err := parseJwt(token)
+	if err != nil {
+		return t, err
+	}
+
+	t.token = *parsedToken
+
+	return t, nil
 }
 
 // String implements fmt.Stringer
@@ -139,4 +219,13 @@ func (t tokenExchangeToken) GetClaim(key string) (interface{}, error) {
 	}
 
 	return nil, ErrNoSuchClaim
+}
+
+func privateToPublicString(pk *rsa.PrivateKey) (string, error) {
+	publicBytes, err := x509.MarshalPKIXPublicKey(pk.Public())
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(publicBytes), nil
 }
