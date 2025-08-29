@@ -24,20 +24,21 @@ const (
 	requestedTokenType     string = "requested_token_type=urn:oci:token-type:oci-upst"
 )
 
-// JwtFunc is a variadic function that returns a JWT from a registered Identity
+// TokenExchangeFunc is a variadic function that returns a JWT from a registered Identity
 // Propagation Trust in string format and an error
-type JwtFunc func(...interface{}) (string, error)
+type TokenExchangeFunc func(...interface{}) (string, error)
 
 // tokenExchangeKeyProvider implements KeyProvider
 type tokenExchangeKeyProvider struct {
 	federationClient federationClient
 	region           common.Region
-	privateKey       *rsa.PrivateKey
 }
 
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
-	region common.Region, tokenFunc JwtFunc) (common.KeyProvider, error) {
+	region common.Region, tokenFunc TokenExchangeFunc, args ...interface{}) (common.KeyProvider, error) {
+
 	fc := &tokenExchangeFederationClient{
+		args:             args,
 		domainUrl:        domainUrl,
 		refreshTokenFunc: tokenFunc,
 		authCode: base64.StdEncoding.EncodeToString([]byte(
@@ -54,7 +55,7 @@ func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
 func (t tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
-	return t.privateKey, nil
+	return t.federationClient.PrivateKey()
 }
 
 // KeyID provides the required receiver for the KeyProvider interface
@@ -71,11 +72,19 @@ func (t tokenExchangeKeyProvider) KeyID() (string, error) {
 type tokenExchangeFederationClient struct {
 	securityToken    securityToken
 	privateKey       *rsa.PrivateKey
-	refreshTokenFunc JwtFunc
-	args             []interface{}
+	refreshTokenFunc TokenExchangeFunc
+	args             []interface{} // Direct access can cause concurrency issues
 	domainUrl        string
 	authCode         string
 	mux              sync.Mutex
+}
+
+// UpdateArgs will update args variable in concurrency-safe manner
+func (t *tokenExchangeFederationClient) UpdateArgs(args []interface{}) {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	t.args = args
 }
 
 // PrivateKey receiver implements federationClient interface
@@ -102,6 +111,14 @@ func (t *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error
 
 func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	if t.securityToken == nil || !t.securityToken.Valid() {
+		t.mux.Lock()
+		defer t.mux.Unlock()
+
+		// Ensure token is not renewed by previously blocked operation
+		if t.securityToken != nil && t.securityToken.Valid() {
+			return nil
+		}
+
 		return t.renewSecurityToken()
 	}
 
@@ -109,8 +126,6 @@ func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 }
 
 func (t *tokenExchangeFederationClient) renewSecurityToken() error {
-	t.mux.Lock()
-	defer t.mux.Unlock()
 
 	// Generate private key using rand.Reader for getting secure randomness from
 	// underlying operating system (e.g. /dev/urandom or getrandom())
@@ -144,7 +159,8 @@ type tokenExchangeToken struct {
 	token jwtToken
 }
 
-func newTokenExchangeToken(jwt, publicKey, host, authCode string) (tokenExchangeToken, error) {
+func newTokenExchangeToken(jwt, publicKey, host,
+	authCode string) (tokenExchangeToken, error) {
 	var t = tokenExchangeToken{}
 
 	data := url.Values{
