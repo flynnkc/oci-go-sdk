@@ -35,7 +35,9 @@ type tokenExchangeKeyProvider struct {
 }
 
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
-	region common.Region, tokenFunc TokenExchangeFunc, args ...interface{}) (common.KeyProvider, error) {
+	region common.Region,
+	tokenFunc TokenExchangeFunc,
+	args ...interface{}) (tokenExchangeKeyProvider, error) {
 
 	fc := &tokenExchangeFederationClient{
 		args:             args,
