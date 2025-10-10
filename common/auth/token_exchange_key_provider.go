@@ -20,8 +20,8 @@ const (
 	//	subTokenSaml           string = "saml"
 	//	subTokenAwsCredential  string = "aws-credential"
 	subTokenJwt            string = "jwt"
-	tokenExchangeGrantType string = "grant_type=urn:ietf:params:oauth:grant-type:token-exchange"
-	requestedTokenType     string = "requested_token_type=urn:oci:token-type:oci-upst"
+	tokenExchangeGrantType string = "urn:ietf:params:oauth:grant-type:token-exchange"
+	requestedTokenType     string = "urn:oci:token-type:oci-upst"
 )
 
 // TokenExchangeFunc is a variadic function that returns a JWT from a registered Identity
@@ -173,7 +173,9 @@ func newTokenExchangeToken(jwt, publicKey, host,
 		"subject_token":        {jwt},
 	}
 
-	request, err := http.NewRequest(http.MethodPost, host, strings.NewReader(data.Encode()))
+	request, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/oauth2/v1/token", host),
+		strings.NewReader(data.Encode()))
 	if err != nil {
 		return t, err
 	}

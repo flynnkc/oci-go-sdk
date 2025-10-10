@@ -19,24 +19,32 @@ type TokenExchangeConfigurationProvider struct {
 func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, clientSecret string,
 	tokenFunc TokenExchangeFunc,
 	args []interface{},
-	region common.Region) common.ConfigurationProvider {
+	region common.Region) (common.ConfigurationProvider, error) {
 
 	kp, err := newTokenExchangeKeyProvider(domainEndpoint, clientId, clientSecret,
 		region, tokenFunc, args)
 	if err != nil {
 		common.Logf("unable to create configuration provider: %s", err)
-		return TokenExchangeConfigurationProvider{}
+		return TokenExchangeConfigurationProvider{}, err
+	}
+
+	// check for errors by trying to get token
+	_, err = kp.KeyID()
+	if err != nil {
+		return TokenExchangeConfigurationProvider{}, err
 	}
 
 	return TokenExchangeConfigurationProvider{
 		keyProvider: kp,
-	}
+	}, nil
 }
 
 // TokenExchangeConfigurationProviderFromJWT returns a new configuration provider
 // from a static User Principal Security Token (UPST)
 func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, clientSecret string,
-	region common.Region) common.ConfigurationProvider {
+	region common.Region) (common.ConfigurationProvider, error) {
+
+	// Wrap the token in a func to give it the correct signature
 	tokenFunc := func(args ...interface{}) (string, error) {
 		return jwt, nil
 	}
