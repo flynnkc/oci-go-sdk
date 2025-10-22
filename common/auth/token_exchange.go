@@ -17,9 +17,9 @@ type TokenExchangeConfigurationProvider struct {
 // TokenExchangeConfigurationProviderFromFunc creates a Configuration Provider from a
 // function provided to retrieve a JWT an identity provider
 func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, clientSecret string,
+	region common.Region,
 	tokenFunc TokenExchangeFunc,
-	args []interface{},
-	region common.Region) (common.ConfigurationProvider, error) {
+	args []interface{}) (common.ConfigurationProvider, error) {
 
 	kp, err := newTokenExchangeKeyProvider(domainEndpoint, clientId, clientSecret,
 		region, tokenFunc, args)
@@ -45,14 +45,14 @@ func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, cl
 	region common.Region) (common.ConfigurationProvider, error) {
 
 	// Wrap the token in a func to give it the correct signature
-	tokenFunc := func(args ...interface{}) (string, error) {
+	tokenFunc := func(args []interface{}) (string, error) {
 		return jwt, nil
 	}
 
 	args := make([]interface{}, 0)
 
 	return TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId,
-		clientSecret, tokenFunc, args, region)
+		clientSecret, region, tokenFunc, args)
 }
 
 func (c TokenExchangeConfigurationProvider) KeyID() (string, error) {

@@ -2,9 +2,14 @@ package example
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
@@ -56,4 +61,88 @@ func ExampleTokenExchangeConfigurationProviderFromJWT() {
 
 	// Output:
 	// Done
+}
+
+func ExampleTokenExchangeConfigurationProviderFromFunc() {
+	args := []interface{}{os.Getenv("ISSUER_ID"), os.Getenv("ISSUER_SECRET")}
+
+	provider, err := auth.TokenExchangeConfigurationProviderFromFunc(
+		os.Getenv("OCI_DOMAIN_ENDPOINT"),
+		os.Getenv("OCI_CLIENT_ID"),
+		os.Getenv("OCI_CLIENT_SECRET"),
+		common.Region(os.Getenv("OCI_REGION")),
+		getJwtFromIssuer,
+		args)
+	helpers.FatalIfError(err)
+
+	key, err := provider.KeyID()
+	log.Printf("key provider id: %v, %v\n", key, err)
+
+	tenancyID := os.Getenv("OCI_ROOT_COMPARTMENT_ID")
+	request := identity.ListAvailabilityDomainsRequest{
+		CompartmentId: &tenancyID,
+	}
+
+	client, err := identity.NewIdentityClientWithConfigurationProvider(provider)
+
+	r, err := client.ListAvailabilityDomains(context.Background(), request)
+	helpers.FatalIfError(err)
+
+	log.Printf("list of availablity domains: %v\n", r.Items)
+	fmt.Println("Done")
+
+	// Output:
+	// Done
+}
+
+func getJwtFromIssuer(v []interface{}) (string, error) {
+	clientId, ok := v[0].(string)
+	if !ok {
+		log.Printf("client id: %v", v[0])
+		return "", fmt.Errorf("invalid issuer client id")
+	}
+
+	clientSecret, ok := v[1].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid issuer client secret")
+	}
+
+	data := url.Values{
+		"grant_type": {"client_credentials"}, // Client credentials flow
+		"scope":      {"token_exchange"},     // Custom scope
+	}
+	method := "POST"
+	url := os.Getenv("ISSUER_ENDPOINT")
+
+	request, err := http.NewRequest(method, url, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", err
+	}
+
+	auth := fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(
+		clientId+":"+clientSecret)))
+
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Authorization", auth)
+
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+
+	defer response.Body.Close()
+
+	var body map[string]interface{}
+	if err = json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("unable to unmarshal response: %s", err)
+	}
+
+	token, ok := body["access_token"].(string)
+	if !ok {
+		return "", fmt.Errorf("unable to unmarshal response: %s", err)
+	}
+
+	return token, nil
 }

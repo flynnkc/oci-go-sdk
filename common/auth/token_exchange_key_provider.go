@@ -26,7 +26,7 @@ const (
 
 // TokenExchangeFunc is a variadic function that returns a JWT from a registered Identity
 // Propagation Trust in string format and an error
-type TokenExchangeFunc func(...interface{}) (string, error)
+type TokenExchangeFunc func([]interface{}) (string, error)
 
 // tokenExchangeKeyProvider implements KeyProvider
 type tokenExchangeKeyProvider struct {
@@ -37,7 +37,7 @@ type tokenExchangeKeyProvider struct {
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 	region common.Region,
 	tokenFunc TokenExchangeFunc,
-	args ...interface{}) (tokenExchangeKeyProvider, error) {
+	args []interface{}) (tokenExchangeKeyProvider, error) {
 
 	fc := &tokenExchangeFederationClient{
 		args:             args,
@@ -127,7 +127,14 @@ func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	return nil
 }
 
-func (t *tokenExchangeFederationClient) renewSecurityToken() error {
+func (t *tokenExchangeFederationClient) renewSecurityToken() (err error) {
+	// Since we are running arbitrary code, we catch panics and return the cause
+	// as an error
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic occurred during token renewal: %v", r)
+		}
+	}()
 
 	// Generate private key using rand.Reader for getting secure randomness from
 	// underlying operating system (e.g. /dev/urandom or getrandom())
@@ -141,7 +148,8 @@ func (t *tokenExchangeFederationClient) renewSecurityToken() error {
 		return err
 	}
 
-	jwt, err := t.refreshTokenFunc(t.args...)
+	// Run the provided token refresh function
+	jwt, err := t.refreshTokenFunc(t.args)
 	if err != nil {
 		return err
 	}
