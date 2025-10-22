@@ -98,7 +98,6 @@ func ExampleTokenExchangeConfigurationProviderFromFunc() {
 func getJwtFromIssuer(v []interface{}) (string, error) {
 	clientId, ok := v[0].(string)
 	if !ok {
-		log.Printf("client id: %v", v[0])
 		return "", fmt.Errorf("invalid issuer client id")
 	}
 
