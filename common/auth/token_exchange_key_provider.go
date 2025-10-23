@@ -40,7 +40,7 @@ type tokenExchangeKeyProvider struct {
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 	region common.Region,
 	tokenFunc TokenExchangeFunc,
-	args []interface{}) (tokenExchangeKeyProvider, error) {
+	args []interface{}) (*tokenExchangeKeyProvider, error) {
 
 	fc := &tokenExchangeFederationClient{
 		httpClient:       &http.Client{Timeout: time.Second * 15},
@@ -56,7 +56,7 @@ func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 		federationClient: fc,
 	}
 
-	return kp, nil
+	return &kp, nil
 }
 
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
@@ -88,11 +88,17 @@ type tokenExchangeFederationClient struct {
 
 // UpdateHTTPClient updates the http.Client so clients with different transports,
 // timeouts, etc. can be used. Locks mutex during update to prevent race conditions.
-func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) {
+func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) error {
+	if c == nil {
+		return fmt.Errorf("invalid *http.Client")
+	}
+
 	fc.mux.Lock()
 	defer fc.mux.Unlock()
 
 	fc.httpClient = c
+
+	return nil
 }
 
 // UpdateArgs updates the function arguments in a concurrency-safe manner. Changes to

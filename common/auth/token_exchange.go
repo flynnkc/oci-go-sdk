@@ -1,18 +1,28 @@
 package auth
 
 import (
+	"crypto/md5"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
+// ConfigurationProviderWithHTTPClient is a configuration provider that exposes claims
+// and allows injecting a custom *http.Client for outbound requests.
+type ConfigurationProviderWithHTTPClient interface {
+	ConfigurationProviderWithClaimAccess
+	SetHTTPClient(*http.Client) error
+}
+
+// TokenExchangeConfigurationProvider provides OCI configuration via token exchange,
+// exposing claims and supporting a custom HTTP client.
 type TokenExchangeConfigurationProvider struct {
-	keyProvider tokenExchangeKeyProvider
+	keyProvider *tokenExchangeKeyProvider
 }
 
 // TokenExchangeConfigurationProviderFromFunc creates a Configuration Provider from a
@@ -20,19 +30,19 @@ type TokenExchangeConfigurationProvider struct {
 func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, clientSecret string,
 	region common.Region,
 	tokenFunc TokenExchangeFunc,
-	args []interface{}) (common.ConfigurationProvider, error) {
+	args []interface{}) (ConfigurationProviderWithHTTPClient, error) {
 
 	kp, err := newTokenExchangeKeyProvider(domainEndpoint, clientId, clientSecret,
 		region, tokenFunc, args)
 	if err != nil {
 		common.Logf("unable to create configuration provider: %s", err)
-		return TokenExchangeConfigurationProvider{}, err
+		return nil, err
 	}
 
-	// check for errors by trying to get token
+	// Check for errors by trying to get token
 	_, err = kp.KeyID()
 	if err != nil {
-		return TokenExchangeConfigurationProvider{}, err
+		return nil, err
 	}
 
 	return TokenExchangeConfigurationProvider{
@@ -43,7 +53,7 @@ func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, client
 // TokenExchangeConfigurationProviderFromJWT returns a new configuration provider
 // from a static User Principal Security Token (UPST)
 func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, clientSecret string,
-	region common.Region) (common.ConfigurationProvider, error) {
+	region common.Region) (ConfigurationProviderWithHTTPClient, error) {
 
 	// Wrap the token in a func to give it the correct signature
 	tokenFunc := func(args []interface{}) (string, error) {
@@ -54,6 +64,10 @@ func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, cl
 
 	return TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId,
 		clientSecret, region, tokenFunc, args)
+}
+
+func (c TokenExchangeConfigurationProvider) GetClaim(key string) (interface{}, error) {
+	return c.keyProvider.federationClient.GetClaim(key)
 }
 
 func (c TokenExchangeConfigurationProvider) KeyID() (string, error) {
@@ -97,41 +111,34 @@ func (c TokenExchangeConfigurationProvider) UserOCID() (string, error) {
 // KeyFingerprint provides the required receiver for the ConfigurationProvider
 // interface
 func (c TokenExchangeConfigurationProvider) KeyFingerprint() (string, error) {
-
 	privateKey, err := c.keyProvider.PrivateRSAKey()
 	if err != nil {
 		return "", err
 	}
-
-	// Marshal the public key to DER format
-	publicKeyDER, err := x509.MarshalPKIXPublicKey(privateKey.Public())
+	der, err := x509.MarshalPKIXPublicKey(privateKey.Public())
 	if err != nil {
 		return "", err
 	}
 
-	// Hash the public key using SHA256
-	hash := sha256.Sum256(publicKeyDER)
+	sum := md5.Sum(der)
+	hexStr := hex.EncodeToString(sum[:]) // 32 hex chars
 
-	// Encode the hash as a hexadecimal string
-	fingerprint := hex.EncodeToString(hash[:])
-
-	// Format the fingerprint as a colon-separated hexadecimal string
-	formattedFingerprint := ""
-	for i, b := range hash {
-		formattedFingerprint += fmt.Sprintf("%02x", b)
-		if i < len(hash)-1 {
-			formattedFingerprint += ":"
+	var sb strings.Builder
+	for i := 0; i < len(hexStr); i += 2 {
+		if i > 0 {
+			sb.WriteByte(':')
 		}
+		sb.WriteString(hexStr[i : i+2])
 	}
+	return sb.String(), nil
 
-	return fingerprint, nil
 }
 
-// Region providers the required receiver for the ConfigurationProvider interface
+// Region provides the required receiver for the ConfigurationProvider interface
 func (c TokenExchangeConfigurationProvider) Region() (string, error) {
 	r := string(c.keyProvider.region)
 	if r == "" {
-		return "", ErrNoSuchClaim
+		return r, fmt.Errorf("no region assigned")
 	}
 
 	return r, nil
@@ -148,6 +155,6 @@ func (c TokenExchangeConfigurationProvider) AuthType() (common.AuthConfig, error
 
 // SetHTTPClient allows a provided http.Client to be used so timeouts, transport
 // and other features can be set as required
-func (c *TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) {
-	c.keyProvider.federationClient.UpdateHTTPClient(h)
+func (c TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) error {
+	return c.keyProvider.federationClient.UpdateHTTPClient(h)
 }

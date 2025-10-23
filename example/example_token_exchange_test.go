@@ -77,12 +77,12 @@ func ExampleTokenExchangeConfigurationProviderFromJWT() {
 
 // ExampleTokenExchangeConfigurationProviderFromFunc demonstrates using a function to get and refresh UPSTs by calling the JWT issuer
 func ExampleTokenExchangeConfigurationProviderFromFunc() {
+	// Optional HTTP Client
+	httpClient := &http.Client{Timeout: time.Second * 10}
+
 	// In this example, TokenExchangeFunc requires the issuer Client ID and issuer
 	// Client Secret to be passed for OAuth2 Client Credentials flow
-	args := []interface{}{os.Getenv("ISSUER_ID"), os.Getenv("ISSUER_SECRET")}
-
-	// Optional to set a provider-defined HTTP Client
-	args = append(args, &http.Client{Timeout: time.Second * 10})
+	args := []interface{}{os.Getenv("ISSUER_ID"), os.Getenv("ISSUER_SECRET"), httpClient}
 
 	provider, err := auth.TokenExchangeConfigurationProviderFromFunc(
 		os.Getenv("OCI_DOMAIN_ENDPOINT"),
@@ -92,6 +92,9 @@ func ExampleTokenExchangeConfigurationProviderFromFunc() {
 		getJWTFromIssuer, // TokenExchangeFunc renews JWT tokens with issuer
 		args)             // Args to be consumed by TokenExchangeFunc
 	helpers.FatalIfError(err)
+
+	// Optional: A default client is provided
+	provider.SetHTTPClient(httpClient)
 
 	tenancyID := os.Getenv("OCI_ROOT_COMPARTMENT_ID")
 	request := identity.ListAvailabilityDomainsRequest{
