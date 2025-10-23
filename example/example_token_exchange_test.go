@@ -81,6 +81,9 @@ func ExampleTokenExchangeConfigurationProviderFromFunc() {
 	// Client Secret to be passed for OAuth2 Client Credentials flow
 	args := []interface{}{os.Getenv("ISSUER_ID"), os.Getenv("ISSUER_SECRET")}
 
+	// Optional to set a provider-defined HTTP Client
+	args = append(args, &http.Client{Timeout: time.Second * 10})
+
 	provider, err := auth.TokenExchangeConfigurationProviderFromFunc(
 		os.Getenv("OCI_DOMAIN_ENDPOINT"),
 		os.Getenv("OCI_CLIENT_ID"),
@@ -141,7 +144,10 @@ func getJWTFromIssuer(args []interface{}) (string, error) {
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Authorization", authHeader)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, ok := args[2].(*http.Client) // User-defined HTTP Client
+	if !ok {
+		return "", fmt.Errorf("unable to use client")
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return "", err

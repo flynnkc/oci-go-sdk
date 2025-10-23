@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
@@ -143,4 +144,10 @@ func (c TokenExchangeConfigurationProvider) AuthType() (common.AuthConfig, error
 		AuthType:         common.UnknownAuthenticationType,
 		IsFromConfigFile: false,
 	}, nil
+}
+
+// SetHTTPClient allows a provided http.Client to be used so timeouts, transport
+// and other features can be set as required
+func (c *TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) {
+	c.keyProvider.federationClient.UpdateHTTPClient(h)
 }

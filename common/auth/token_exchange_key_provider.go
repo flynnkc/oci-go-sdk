@@ -32,7 +32,7 @@ type TokenExchangeFunc func([]interface{}) (string, error)
 
 // tokenExchangeKeyProvider implements KeyProvider
 type tokenExchangeKeyProvider struct {
-	federationClient federationClient
+	federationClient *tokenExchangeFederationClient
 	region           common.Region
 }
 
@@ -60,13 +60,13 @@ func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 }
 
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
-func (t *tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
-	return t.federationClient.PrivateKey()
+func (kp *tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
+	return kp.federationClient.PrivateKey()
 }
 
 // KeyID provides the required receiver for the KeyProvider interface
-func (t *tokenExchangeKeyProvider) KeyID() (string, error) {
-	securityToken, err := t.federationClient.SecurityToken()
+func (kp *tokenExchangeKeyProvider) KeyID() (string, error) {
+	securityToken, err := kp.federationClient.SecurityToken()
 	if err != nil {
 		return "", err
 	}
@@ -87,70 +87,70 @@ type tokenExchangeFederationClient struct {
 }
 
 // UpdateHTTPClient updates the http.Client so clients with different transports,
-// timeouts, etc. can be used
-func (t *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) {
-	t.mux.Lock()
-	defer t.mux.Unlock()
+// timeouts, etc. can be used. Locks mutex during update to prevent race conditions.
+func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) {
+	fc.mux.Lock()
+	defer fc.mux.Unlock()
 
-	t.httpClient = c
+	fc.httpClient = c
 }
 
 // UpdateArgs updates the function arguments in a concurrency-safe manner. Changes to
 // arguments MUST be done with UpdateArgs to avoid race conditions.
-func (t *tokenExchangeFederationClient) UpdateArgs(args []interface{}) {
-	t.mux.Lock()
-	defer t.mux.Unlock()
+func (fc *tokenExchangeFederationClient) UpdateArgs(args []interface{}) {
+	fc.mux.Lock()
+	defer fc.mux.Unlock()
 
-	t.args = args
+	fc.args = args
 }
 
 // ReadArgs will return the arguments from the federation client while avoiding
 // concurrency issues. Arguments MUST be read with ReadArgs.
-func (t *tokenExchangeFederationClient) ReadArgs() []interface{} {
-	t.mux.Lock()
-	defer t.mux.Unlock()
+func (fc *tokenExchangeFederationClient) ReadArgs() []interface{} {
+	fc.mux.Lock()
+	defer fc.mux.Unlock()
 
-	return t.args
+	return fc.args
 }
 
 // PrivateKey receiver implements federationClient interface
-func (t *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
-	if err := t.renewSecurityTokenIfNotValid(); err != nil {
+func (fc *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
+	if err := fc.renewSecurityTokenIfNotValid(); err != nil {
 		return nil, err
 	}
 
-	return t.privateKey, nil
+	return fc.privateKey, nil
 }
 
 // SecurityToken receiver implements federationClient interface
-func (t *tokenExchangeFederationClient) SecurityToken() (string, error) {
-	if err := t.renewSecurityTokenIfNotValid(); err != nil {
+func (fc *tokenExchangeFederationClient) SecurityToken() (string, error) {
+	if err := fc.renewSecurityTokenIfNotValid(); err != nil {
 		return "", err
 	}
 
-	return t.securityToken.String(), nil
+	return fc.securityToken.String(), nil
 }
 
 // GetClaim returns claims embedded in the UPST
-func (t *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error) {
-	return t.securityToken.GetClaim(key)
+func (fc *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error) {
+	return fc.securityToken.GetClaim(key)
 }
 
 // renewSecurityTokenIfNotValid checks if token is valid and initiates refresh if needed.
 // Mutex is locked here if an operation is needed to prevent concurrency errors.
-func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
-	if t.securityToken == nil || !t.securityToken.Valid() {
+func (fc *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
+	if fc.securityToken == nil || !fc.securityToken.Valid() {
 		// Lock here to prevent renewSecurityToken from making surplus calls to the
 		// authorization server and identity domain
-		t.mux.Lock()
-		defer t.mux.Unlock()
+		fc.mux.Lock()
+		defer fc.mux.Unlock()
 
 		// Ensure token is not renewed by previously blocked operation
-		if t.securityToken != nil && t.securityToken.Valid() {
+		if fc.securityToken != nil && fc.securityToken.Valid() {
 			return nil
 		}
 
-		return t.renewSecurityToken()
+		return fc.renewSecurityToken()
 	}
 
 	return nil
@@ -159,7 +159,7 @@ func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 // renewSecurityToken initiates renewal of the UPST returned by the
 // tokenExchangeFederationClient. Should only be called by renewSecurityTokenIfNotValid.
 // Rotates RSA key and updates federation client with fresh UPST and private key.
-func (t *tokenExchangeFederationClient) renewSecurityToken() (err error) {
+func (fc *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 	var jwt string
 
 	// Since we are running arbitrary code, we catch panics and return the cause
@@ -173,7 +173,7 @@ func (t *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 		}()
 
 		// Get a fresh JWT from the issuer
-		jwt, err = t.refreshTokenFunc(t.args)
+		jwt, err = fc.refreshTokenFunc(fc.args)
 
 	}()
 	if err != nil {
@@ -190,14 +190,15 @@ func (t *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 		return fmt.Errorf("unable to derive public key: %w", err)
 	}
 
-	securityToken, err := newTokenExchangeToken(t.httpClient, jwt, publicKey, t.domainUrl, t.authCode)
+	securityToken, err := newTokenExchangeToken(fc.httpClient, jwt, publicKey,
+		fc.domainUrl, fc.authCode)
 	if err != nil {
 		return fmt.Errorf("unable to exchange for UPST: %w", err)
 	}
 
 	// privateKey and securityToken ONLY updated here while under lock from renewSecurityTokenIfNotValid
-	t.privateKey = privateKey
-	t.securityToken = securityToken
+	fc.privateKey = privateKey
+	fc.securityToken = securityToken
 
 	return nil
 }
