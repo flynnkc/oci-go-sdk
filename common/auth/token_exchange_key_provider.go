@@ -23,10 +23,11 @@ const (
 	subTokenJwt            string = "jwt"
 	tokenExchangeGrantType string = "urn:ietf:params:oauth:grant-type:token-exchange"
 	requestedTokenType     string = "urn:oci:token-type:oci-upst"
+	rsaKeyBits             int    = 2048
 )
 
-// TokenExchangeFunc is a variadic function that returns a JWT from a registered Identity
-// Propagation Trust in string format and an error
+// TokenExchangeFunc is a caller-provided function that returns a JWT from a
+// registered Identity Propagation Trust in string format and an error
 type TokenExchangeFunc func([]interface{}) (string, error)
 
 // tokenExchangeKeyProvider implements KeyProvider
@@ -35,12 +36,14 @@ type tokenExchangeKeyProvider struct {
 	region           common.Region
 }
 
+// newTokenExchangeKeyProvider assembles and returns a KeyProvider
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 	region common.Region,
 	tokenFunc TokenExchangeFunc,
 	args []interface{}) (tokenExchangeKeyProvider, error) {
 
 	fc := &tokenExchangeFederationClient{
+		httpClient:       &http.Client{Timeout: time.Second * 15},
 		args:             args,
 		domainUrl:        domainUrl,
 		refreshTokenFunc: tokenFunc,
@@ -57,12 +60,12 @@ func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
 }
 
 // PrivateRSAKey provides the required receiver for the KeyProvider interface
-func (t tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
+func (t *tokenExchangeKeyProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
 	return t.federationClient.PrivateKey()
 }
 
 // KeyID provides the required receiver for the KeyProvider interface
-func (t tokenExchangeKeyProvider) KeyID() (string, error) {
+func (t *tokenExchangeKeyProvider) KeyID() (string, error) {
 	securityToken, err := t.federationClient.SecurityToken()
 	if err != nil {
 		return "", err
@@ -73,6 +76,7 @@ func (t tokenExchangeKeyProvider) KeyID() (string, error) {
 
 // tokenExchangeFederationClient implements federationClient
 type tokenExchangeFederationClient struct {
+	httpClient       *http.Client
 	securityToken    securityToken
 	privateKey       *rsa.PrivateKey
 	refreshTokenFunc TokenExchangeFunc
@@ -82,12 +86,31 @@ type tokenExchangeFederationClient struct {
 	mux              sync.Mutex
 }
 
-// UpdateArgs will update args variable in concurrency-safe manner
+// UpdateHTTPClient updates the http.Client so clients with different transports,
+// timeouts, etc. can be used
+func (t *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	t.httpClient = c
+}
+
+// UpdateArgs updates the function arguments in a concurrency-safe manner. Changes to
+// arguments MUST be done with UpdateArgs to avoid race conditions.
 func (t *tokenExchangeFederationClient) UpdateArgs(args []interface{}) {
 	t.mux.Lock()
 	defer t.mux.Unlock()
 
 	t.args = args
+}
+
+// ReadArgs will return the arguments from the federation client while avoiding
+// concurrency issues. Arguments MUST be read with ReadArgs.
+func (t *tokenExchangeFederationClient) ReadArgs() []interface{} {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	return t.args
 }
 
 // PrivateKey receiver implements federationClient interface
@@ -108,12 +131,17 @@ func (t *tokenExchangeFederationClient) SecurityToken() (string, error) {
 	return t.securityToken.String(), nil
 }
 
+// GetClaim returns claims embedded in the UPST
 func (t *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error) {
 	return t.securityToken.GetClaim(key)
 }
 
+// renewSecurityTokenIfNotValid checks if token is valid and initiates refresh if needed.
+// Mutex is locked here if an operation is needed to prevent concurrency errors.
 func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	if t.securityToken == nil || !t.securityToken.Valid() {
+		// Lock here to prevent renewSecurityToken from making surplus calls to the
+		// authorization server and identity domain
 		t.mux.Lock()
 		defer t.mux.Unlock()
 
@@ -128,51 +156,60 @@ func (t *tokenExchangeFederationClient) renewSecurityTokenIfNotValid() error {
 	return nil
 }
 
+// renewSecurityToken initiates renewal of the UPST returned by the
+// tokenExchangeFederationClient. Should only be called by renewSecurityTokenIfNotValid.
+// Rotates RSA key and updates federation client with fresh UPST and private key.
 func (t *tokenExchangeFederationClient) renewSecurityToken() (err error) {
+	var jwt string
+
 	// Since we are running arbitrary code, we catch panics and return the cause
 	// as an error
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic occurred during token renewal: %v", r)
-		}
+	func() {
+		// Scope recover around caller-provided code
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic occurred during token renewal: %v", r)
+			}
+		}()
+
+		// Get a fresh JWT from the issuer
+		jwt, err = t.refreshTokenFunc(t.args)
+
 	}()
-
-	// Generate private key using rand.Reader for getting secure randomness from
-	// underlying operating system (e.g. /dev/urandom or getrandom())
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to refresh JWT: %w", err)
 	}
 
-	publicKey, err := privateToPublicString(privateKey)
+	privateKey, err := rsa.GenerateKey(rand.Reader, rsaKeyBits)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to generate RSA key: %w", err)
 	}
 
-	// Run the provided token refresh function
-	jwt, err := t.refreshTokenFunc(t.args)
+	publicKey, err := privateToPublicDERBase64(privateKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to derive public key: %w", err)
 	}
 
-	token, err := newTokenExchangeToken(jwt, publicKey, t.domainUrl, t.authCode)
+	securityToken, err := newTokenExchangeToken(t.httpClient, jwt, publicKey, t.domainUrl, t.authCode)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to exchange for UPST: %w", err)
 	}
 
+	// privateKey and securityToken ONLY updated here while under lock from renewSecurityTokenIfNotValid
 	t.privateKey = privateKey
-	t.securityToken = token
+	t.securityToken = securityToken
 
 	return nil
 }
 
+// tokenExchangeToken contains token and any related fields
 type tokenExchangeToken struct {
 	token jwtToken
 }
 
-func newTokenExchangeToken(jwt, publicKey, host,
-	authCode string) (tokenExchangeToken, error) {
-	var t = tokenExchangeToken{}
+// newTokenExchangeToken assembles and returns a tokenExchangeToken issued by OCI
+func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode string) (tokenExchangeToken, error) {
+	var t tokenExchangeToken
 
 	data := url.Values{
 		"requested_token_type": {requestedTokenType},
@@ -182,8 +219,12 @@ func newTokenExchangeToken(jwt, publicKey, host,
 		"subject_token":        {jwt},
 	}
 
-	request, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("%s/oauth2/v1/token", host),
+	tokenURL, err := url.JoinPath(host, "oauth2", "v1", "token")
+	if err != nil {
+		return t, fmt.Errorf("unable to construct token url: %w", err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, tokenURL,
 		strings.NewReader(data.Encode()))
 	if err != nil {
 		return t, err
@@ -191,8 +232,8 @@ func newTokenExchangeToken(jwt, publicKey, host,
 
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Authorization", "Basic "+authCode)
+	request.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 12 * time.Second}
 	r, err := client.Do(request)
 	if err != nil {
 		return t, err
@@ -205,17 +246,17 @@ func newTokenExchangeToken(jwt, publicKey, host,
 
 	var response map[string]interface{}
 	if err = json.NewDecoder(r.Body).Decode(&response); err != nil {
-		return t, fmt.Errorf("unable to unmarshal response: %s", err)
+		return t, fmt.Errorf("unable to unmarshal response: %w", err)
 	}
 
 	token, ok := response["token"].(string)
 	if !ok {
-		return t, fmt.Errorf("unable to unmarshal response: %s", err)
+		return t, fmt.Errorf("no token returned in response")
 	}
 
 	parsedToken, err := parseJwt(token)
 	if err != nil {
-		return t, err
+		return t, fmt.Errorf("unable to parse token: %w", err)
 	}
 
 	t.token = *parsedToken
@@ -250,7 +291,8 @@ func (t tokenExchangeToken) GetClaim(key string) (interface{}, error) {
 	return nil, ErrNoSuchClaim
 }
 
-func privateToPublicString(pk *rsa.PrivateKey) (string, error) {
+// privateToPublicDERBase64 takes an RSA Private Key and returns a public key in PEM format
+func privateToPublicDERBase64(pk *rsa.PrivateKey) (string, error) {
 	publicBytes, err := x509.MarshalPKIXPublicKey(pk.Public())
 	if err != nil {
 		return "", err
