@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
@@ -191,7 +192,7 @@ func newTokenExchangeToken(jwt, publicKey, host,
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Authorization", "Basic "+authCode)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 12 * time.Second}
 	r, err := client.Do(request)
 	if err != nil {
 		return t, err
