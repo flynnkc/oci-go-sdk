@@ -245,17 +245,20 @@ func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode s
 		return t, fmt.Errorf("invalid token endpoint response %s", r.Status)
 	}
 
-	var response map[string]interface{}
-	if err = json.NewDecoder(r.Body).Decode(&response); err != nil {
+	type tokenResponse struct {
+		Token string `json:"token"`
+	}
+
+	var responseBody tokenResponse
+	if err = json.NewDecoder(r.Body).Decode(&responseBody); err != nil {
 		return t, fmt.Errorf("unable to unmarshal response: %w", err)
 	}
 
-	token, ok := response["token"].(string)
-	if !ok {
-		return t, fmt.Errorf("no token returned in response")
+	if responseBody.Token == "" {
+		return t, fmt.Errorf("token not found in response")
 	}
 
-	parsedToken, err := parseJwt(token)
+	parsedToken, err := parseJwt(responseBody.Token)
 	if err != nil {
 		return t, fmt.Errorf("unable to parse token: %w", err)
 	}
