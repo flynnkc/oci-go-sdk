@@ -75,7 +75,7 @@ func ExampleTokenExchangeConfigurationProviderFromJWT() {
 	// Done
 }
 
-// ExampleTokenExchangeConfigurationProviderFromFunc demonstrates using a function to
+// ExampleTokenExchangeConfigurationProviderFromIssuer demonstrates using a function to
 // get and refresh UPSTs by calling the JWT issuer
 func ExampleTokenExchangeConfigurationProviderFromIssuer() {
 	// Optional HTTP Client
