@@ -26,14 +26,19 @@ const (
 	rsaKeyBits             int    = 2048
 )
 
+// TokenIssuer defines a type capable of retrieving JWT tokens for the issuing
+// authorization server
 type TokenIssuer interface {
 	GetToken() (string, error)
 }
 
+// StaticTokenIssuer is a defined TokenIssuer that holds a static token
 type StaticTokenIssuer struct {
 	token string
 }
 
+// GetToken satisfies the TokenIssuer interface for StaticTokenIssuer by returning
+// the token held by StaticTokenIssuer
 func (s StaticTokenIssuer) GetToken() (string, error) {
 	return s.token, nil
 }
