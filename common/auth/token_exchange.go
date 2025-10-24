@@ -26,14 +26,12 @@ type TokenExchangeConfigurationProvider struct {
 }
 
 // TokenExchangeConfigurationProviderFromFunc creates a Configuration Provider from a
-// function provided to retrieve a JWT an identity provider
-func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, clientSecret string,
-	region common.Region,
-	tokenFunc TokenExchangeFunc,
-	args []interface{}) (ConfigurationProviderWithHTTPClient, error) {
+// function provided to retrieve a JWT from an identity provider
+func TokenExchangeConfigurationProviderFromFunc(domainUrl, clientId, clientSecret string,
+	region string, tokenIssuer TokenIssuer) (ConfigurationProviderWithHTTPClient, error) {
 
-	kp, err := newTokenExchangeKeyProvider(domainEndpoint, clientId, clientSecret,
-		region, tokenFunc, args)
+	kp, err := newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret,
+		region, tokenIssuer)
 	if err != nil {
 		common.Logf("unable to create configuration provider: %s", err)
 		return nil, err
@@ -45,7 +43,7 @@ func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, client
 		return nil, err
 	}
 
-	return TokenExchangeConfigurationProvider{
+	return &TokenExchangeConfigurationProvider{
 		keyProvider: kp,
 	}, nil
 }
@@ -53,17 +51,12 @@ func TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId, client
 // TokenExchangeConfigurationProviderFromJWT returns a new configuration provider
 // from a static User Principal Security Token (UPST)
 func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, clientSecret string,
-	region common.Region) (ConfigurationProviderWithHTTPClient, error) {
+	region string) (ConfigurationProviderWithHTTPClient, error) {
 
-	// Wrap the token in a func to give it the correct signature
-	tokenFunc := func(args []interface{}) (string, error) {
-		return jwt, nil
-	}
-
-	args := make([]interface{}, 0)
+	issuer := StaticTokenIssuer{token: jwt}
 
 	return TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId,
-		clientSecret, region, tokenFunc, args)
+		clientSecret, region, issuer)
 }
 
 func (c TokenExchangeConfigurationProvider) GetClaim(key string) (interface{}, error) {
@@ -138,7 +131,7 @@ func (c TokenExchangeConfigurationProvider) KeyFingerprint() (string, error) {
 func (c TokenExchangeConfigurationProvider) Region() (string, error) {
 	r := string(c.keyProvider.region)
 	if r == "" {
-		return r, fmt.Errorf("no region assigned")
+		return "", fmt.Errorf("no region assigned")
 	}
 
 	return r, nil
@@ -155,6 +148,6 @@ func (c TokenExchangeConfigurationProvider) AuthType() (common.AuthConfig, error
 
 // SetHTTPClient allows a provided http.Client to be used so timeouts, transport
 // and other features can be set as required
-func (c TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) error {
+func (c *TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) error {
 	return c.keyProvider.federationClient.UpdateHTTPClient(h)
 }

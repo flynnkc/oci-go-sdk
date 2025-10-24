@@ -26,9 +26,17 @@ const (
 	rsaKeyBits             int    = 2048
 )
 
-// TokenExchangeFunc is a caller-provided function that returns a JWT from a
-// registered Identity Propagation Trust in string format and an error
-type TokenExchangeFunc func([]interface{}) (string, error)
+type TokenIssuer interface {
+	GetToken() (string, error)
+}
+
+type StaticTokenIssuer struct {
+	token string
+}
+
+func (s StaticTokenIssuer) GetToken() (string, error) {
+	return s.token, nil
+}
 
 // tokenExchangeKeyProvider implements KeyProvider
 type tokenExchangeKeyProvider struct {
@@ -38,21 +46,24 @@ type tokenExchangeKeyProvider struct {
 
 // newTokenExchangeKeyProvider assembles and returns a KeyProvider
 func newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret string,
-	region common.Region,
-	tokenFunc TokenExchangeFunc,
-	args []interface{}) (*tokenExchangeKeyProvider, error) {
+	region string,
+	tokenIssuer TokenIssuer) (*tokenExchangeKeyProvider, error) {
+
+	if domainUrl == "" || clientId == "" || clientSecret == "" || region == "" ||
+		tokenIssuer == nil {
+		return nil, fmt.Errorf("invalid arguments to newTokenExchangeKeyProvider")
+	}
 
 	fc := &tokenExchangeFederationClient{
-		httpClient:       &http.Client{Timeout: time.Second * 15},
-		args:             args,
-		domainUrl:        domainUrl,
-		refreshTokenFunc: tokenFunc,
+		httpClient:  &http.Client{Timeout: time.Second * 15},
+		domainUrl:   domainUrl,
+		tokenIssuer: tokenIssuer,
 		authCode: base64.StdEncoding.EncodeToString([]byte(
 			clientId + ":" + clientSecret)),
 	}
 
 	kp := tokenExchangeKeyProvider{
-		region:           region,
+		region:           common.StringToRegion(region),
 		federationClient: fc,
 	}
 
@@ -76,18 +87,18 @@ func (kp *tokenExchangeKeyProvider) KeyID() (string, error) {
 
 // tokenExchangeFederationClient implements federationClient
 type tokenExchangeFederationClient struct {
-	httpClient       *http.Client
-	securityToken    securityToken
-	privateKey       *rsa.PrivateKey
-	refreshTokenFunc TokenExchangeFunc
-	args             []interface{} // Direct access can cause concurrency issues
-	domainUrl        string
-	authCode         string
-	mux              sync.Mutex
+	httpClient    *http.Client
+	securityToken securityToken
+	privateKey    *rsa.PrivateKey
+	tokenIssuer   TokenIssuer
+	domainUrl     string
+	authCode      string
+	mux           sync.Mutex
 }
 
 // UpdateHTTPClient updates the http.Client so clients with different transports,
 // timeouts, etc. can be used. Locks mutex during update to prevent race conditions.
+// Safe for concurrent use.
 func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) error {
 	if c == nil {
 		return fmt.Errorf("invalid *http.Client")
@@ -101,25 +112,7 @@ func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) error 
 	return nil
 }
 
-// UpdateArgs updates the function arguments in a concurrency-safe manner. Changes to
-// arguments MUST be done with UpdateArgs to avoid race conditions.
-func (fc *tokenExchangeFederationClient) UpdateArgs(args []interface{}) {
-	fc.mux.Lock()
-	defer fc.mux.Unlock()
-
-	fc.args = args
-}
-
-// ReadArgs will return the arguments from the federation client while avoiding
-// concurrency issues. Arguments MUST be read with ReadArgs.
-func (fc *tokenExchangeFederationClient) ReadArgs() []interface{} {
-	fc.mux.Lock()
-	defer fc.mux.Unlock()
-
-	return fc.args
-}
-
-// PrivateKey receiver implements federationClient interface
+// PrivateKey receiver implements federationClient interface. Safe for concurrent use.
 func (fc *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
 	if err := fc.renewSecurityTokenIfNotValid(); err != nil {
 		return nil, err
@@ -128,7 +121,8 @@ func (fc *tokenExchangeFederationClient) PrivateKey() (*rsa.PrivateKey, error) {
 	return fc.privateKey, nil
 }
 
-// SecurityToken receiver implements federationClient interface
+// SecurityToken receiver implements federationClient interface. Safe for concurrent
+// use.
 func (fc *tokenExchangeFederationClient) SecurityToken() (string, error) {
 	if err := fc.renewSecurityTokenIfNotValid(); err != nil {
 		return "", err
@@ -179,7 +173,7 @@ func (fc *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 		}()
 
 		// Get a fresh JWT from the issuer
-		jwt, err = fc.refreshTokenFunc(fc.args)
+		jwt, err = fc.tokenIssuer.GetToken()
 
 	}()
 	if err != nil {
@@ -298,7 +292,7 @@ func (t tokenExchangeToken) GetClaim(key string) (interface{}, error) {
 	return nil, ErrNoSuchClaim
 }
 
-// privateToPublicDERBase64 takes an RSA Private Key and returns a public key in PEM format
+// privateToPublicDERBase64 takes an RSA Private Key and returns a public key in DER format
 func privateToPublicDERBase64(pk *rsa.PrivateKey) (string, error) {
 	publicBytes, err := x509.MarshalPKIXPublicKey(pk.Public())
 	if err != nil {
