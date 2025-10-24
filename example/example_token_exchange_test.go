@@ -77,7 +77,7 @@ func ExampleTokenExchangeConfigurationProviderFromJWT() {
 
 // ExampleTokenExchangeConfigurationProviderFromFunc demonstrates using a function to
 // get and refresh UPSTs by calling the JWT issuer
-func ExampleTokenExchangeConfigurationProviderFromFunc() {
+func ExampleTokenExchangeConfigurationProviderFromIssuer() {
 	// Optional HTTP Client
 	httpClient := &http.Client{Timeout: time.Second * 10}
 
@@ -92,7 +92,7 @@ func ExampleTokenExchangeConfigurationProviderFromFunc() {
 	}
 
 	// The provider consumes the TokenIssuer and exchanges the issued JWT(s) for UPST(s)
-	provider, err := auth.TokenExchangeConfigurationProviderFromFunc(
+	provider, err := auth.TokenExchangeConfigurationProviderFromIssuer(
 		issuer, // Gets and refreshes JWT tokens
 		os.Getenv("OCI_DOMAIN_URL"),
 		os.Getenv("OCI_CLIENT_ID"),
