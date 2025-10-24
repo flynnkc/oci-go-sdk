@@ -38,12 +38,6 @@ func TokenExchangeConfigurationProviderFromIssuer(tokenIssuer TokenIssuer,
 		return nil, err
 	}
 
-	// Check for errors by trying to get token
-	_, err = kp.KeyID()
-	if err != nil {
-		return nil, err
-	}
-
 	return &TokenExchangeConfigurationProvider{
 		keyProvider: kp,
 	}, nil

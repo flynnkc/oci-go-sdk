@@ -138,6 +138,10 @@ func (fc *tokenExchangeFederationClient) SecurityToken() (string, error) {
 
 // GetClaim returns claims embedded in the UPST
 func (fc *tokenExchangeFederationClient) GetClaim(key string) (interface{}, error) {
+	if err := fc.renewSecurityTokenIfNotValid(); err != nil {
+		return nil, fmt.Errorf("unable to retrieve claim: %w", err)
+	}
+
 	return fc.securityToken.GetClaim(key)
 }
 
