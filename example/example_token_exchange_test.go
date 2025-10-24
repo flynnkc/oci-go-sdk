@@ -93,11 +93,11 @@ func ExampleTokenExchangeConfigurationProviderFromFunc() {
 
 	// The provider consumes the TokenIssuer and exchanges the issued JWT(s) for UPST(s)
 	provider, err := auth.TokenExchangeConfigurationProviderFromFunc(
+		issuer, // Gets and refreshes JWT tokens
 		os.Getenv("OCI_DOMAIN_URL"),
 		os.Getenv("OCI_CLIENT_ID"),
 		os.Getenv("OCI_CLIENT_SECRET"),
-		os.Getenv("OCI_REGION"),
-		issuer) // Gets and refreshes JWT tokens
+		os.Getenv("OCI_REGION"))
 	helpers.FatalIfError(err)
 
 	// Optional: A default client is provided

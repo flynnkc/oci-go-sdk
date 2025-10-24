@@ -27,8 +27,9 @@ type TokenExchangeConfigurationProvider struct {
 
 // TokenExchangeConfigurationProviderFromFunc creates a Configuration Provider from a
 // function provided to retrieve a JWT from an identity provider
-func TokenExchangeConfigurationProviderFromFunc(domainUrl, clientId, clientSecret string,
-	region string, tokenIssuer TokenIssuer) (ConfigurationProviderWithHTTPClient, error) {
+func TokenExchangeConfigurationProviderFromFunc(tokenIssuer TokenIssuer,
+	domainUrl, clientId, clientSecret string,
+	region string) (ConfigurationProviderWithHTTPClient, error) {
 
 	kp, err := newTokenExchangeKeyProvider(domainUrl, clientId, clientSecret,
 		region, tokenIssuer)
@@ -55,8 +56,8 @@ func TokenExchangeConfigurationProviderFromJWT(jwt, domainEndpoint, clientId, cl
 
 	issuer := StaticTokenIssuer{token: jwt}
 
-	return TokenExchangeConfigurationProviderFromFunc(domainEndpoint, clientId,
-		clientSecret, region, issuer)
+	return TokenExchangeConfigurationProviderFromFunc(issuer, domainEndpoint, clientId,
+		clientSecret, region)
 }
 
 func (c TokenExchangeConfigurationProvider) GetClaim(key string) (interface{}, error) {
