@@ -1,14 +1,19 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
+	mrand "math/rand"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +25,13 @@ const (
 	//	subTokenSpnego         string = "spnego"
 	//	subTokenSaml           string = "saml"
 	//	subTokenAwsCredential  string = "aws-credential"
-	subTokenJwt            string = "jwt"
-	tokenExchangeGrantType string = "urn:ietf:params:oauth:grant-type:token-exchange"
-	requestedTokenType     string = "urn:oci:token-type:oci-upst"
-	rsaKeyBits             int    = 2048
+	subTokenJwt            string        = "jwt"
+	tokenExchangeGrantType string        = "urn:ietf:params:oauth:grant-type:token-exchange"
+	requestedTokenType     string        = "urn:oci:token-type:oci-upst"
+	rsaKeyBits             int           = 2048
+	ctxTimeout             time.Duration = 10 * time.Second
+	maxAttempts            int           = 5
+	maxBackoff             time.Duration = 2 * time.Second
 )
 
 // TokenIssuer defines a type capable of retrieving JWT tokens for the issuing
@@ -175,6 +183,7 @@ func (fc *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 	// as an error
 	func() {
 		// Scope recover around caller-provided code
+		common.Logf("attempting to retrieve token from issuer")
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("panic occurred during token renewal: %v", r)
@@ -185,6 +194,7 @@ func (fc *tokenExchangeFederationClient) renewSecurityToken() (err error) {
 		jwt, err = fc.tokenIssuer.GetToken()
 
 	}()
+
 	if err != nil {
 		return fmt.Errorf("unable to refresh JWT: %w", err)
 	}
@@ -220,38 +230,93 @@ type tokenExchangeToken struct {
 // newTokenExchangeToken assembles and returns a tokenExchangeToken issued by OCI
 func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode string) (tokenExchangeToken, error) {
 	var t tokenExchangeToken
+	var err error
 
-	data := url.Values{
+	form := url.Values{
 		"requested_token_type": {requestedTokenType},
 		"grant_type":           {tokenExchangeGrantType},
 		"public_key":           {publicKey},
 		"subject_token_type":   {subTokenJwt},
 		"subject_token":        {jwt},
+	}.Encode()
+
+	// Build URL
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return t, fmt.Errorf("invalid host base URL: %q", host)
+	} else if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	u.Path = path.Join(u.Path, "oauth2", "v1", "token")
+	tokenURL := u.String()
+
+	// Retry and backoff
+	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+	backoff := 100 * time.Millisecond
+
+	var resp *http.Response
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		common.Logf("attempt %d to retrieve UPST (max attempts %d)", attempt,
+			maxAttempts)
+
+		ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL,
+			strings.NewReader(form))
+		if err != nil {
+			cancel()
+			return t, err
+		}
+
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Authorization", "Basic "+authCode)
+		request.Header.Set("Accept", "application/json")
+
+		resp, err = client.Do(request)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			cancel()
+			break
+		}
+		// Skip last sleep on max attempts
+		if attempt == maxAttempts {
+			cancel()
+			break
+		}
+		// Do not retry response codes
+		if resp != nil && (resp.StatusCode == http.StatusBadRequest ||
+			resp.StatusCode == http.StatusUnauthorized ||
+			resp.StatusCode == http.StatusNotFound) {
+			resp.Body.Close()
+			cancel()
+			break
+		}
+
+		if resp != nil {
+			common.Logf("invalid response from domain: %d - %v", resp.StatusCode, err)
+			_, _ = io.Copy(ioutil.Discard, resp.Body)
+			resp.Body.Close()
+		} else {
+			common.Logf("invalid response from domain: %v", err)
+		}
+
+		jitter := time.Duration(r.Int63n(int64(backoff / 2)))
+		sleep := backoff + jitter
+		time.Sleep(sleep)
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		cancel()
 	}
 
-	tokenURL, err := url.JoinPath(host, "oauth2", "v1", "token")
-	if err != nil {
-		return t, fmt.Errorf("unable to construct token url: %w", err)
+	if resp == nil {
+		return t, fmt.Errorf("no response from domain: %w", err)
 	}
+	defer resp.Body.Close()
 
-	request, err := http.NewRequest(http.MethodPost, tokenURL,
-		strings.NewReader(data.Encode()))
-	if err != nil {
-		return t, err
-	}
-
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Authorization", "Basic "+authCode)
-	request.Header.Set("Accept", "application/json")
-
-	r, err := client.Do(request)
-	if err != nil {
-		return t, err
-	}
-	defer r.Body.Close()
-
-	if r.StatusCode != http.StatusOK {
-		return t, fmt.Errorf("invalid token endpoint response %s", r.Status)
+	if resp.StatusCode != http.StatusOK {
+		return t, fmt.Errorf("invalid token endpoint response %s", resp.Status)
 	}
 
 	type tokenResponse struct {
@@ -259,7 +324,7 @@ func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode s
 	}
 
 	var responseBody tokenResponse
-	if err = json.NewDecoder(r.Body).Decode(&responseBody); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
 		return t, fmt.Errorf("unable to unmarshal response: %w", err)
 	}
 
