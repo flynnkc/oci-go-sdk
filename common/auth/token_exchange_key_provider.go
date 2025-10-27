@@ -9,11 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	mrand "math/rand"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +26,7 @@ const (
 	subTokenJwt            string        = "jwt"
 	tokenExchangeGrantType string        = "urn:ietf:params:oauth:grant-type:token-exchange"
 	requestedTokenType     string        = "urn:oci:token-type:oci-upst"
-	rsaKeyBits             int           = 2048
+	rsaKeyBits             int           = 3072
 	ctxTimeout             time.Duration = 10 * time.Second
 	maxAttempts            int           = 5
 	maxBackoff             time.Duration = 2 * time.Second
@@ -240,20 +238,14 @@ func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode s
 		"subject_token":        {jwt},
 	}.Encode()
 
-	// Build URL
-	u, err := url.Parse(host)
-	if err != nil || u.Host == "" {
-		return t, fmt.Errorf("invalid host base URL: %q", host)
-	} else if u.Scheme == "" {
-		u.Scheme = "https"
+	tokenURL, err := buildTokenURL(host)
+	if err != nil {
+		return t, fmt.Errorf("unable to build token endpoint url: %w", err)
 	}
-	u.Path = path.Join(u.Path, "oauth2", "v1", "token")
-	tokenURL := u.String()
 
 	// Retry and backoff
 	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	backoff := 100 * time.Millisecond
-
 	var resp *http.Response
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		common.Logf("attempt %d to retrieve UPST (max attempts %d)", attempt,
@@ -285,15 +277,14 @@ func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode s
 		if resp != nil && (resp.StatusCode == http.StatusBadRequest ||
 			resp.StatusCode == http.StatusUnauthorized ||
 			resp.StatusCode == http.StatusNotFound) {
-			resp.Body.Close()
+			drainResponseBody(resp)
 			cancel()
 			break
 		}
 
 		if resp != nil {
-			common.Logf("invalid response from domain: %d - %v", resp.StatusCode, err)
-			_, _ = io.Copy(ioutil.Discard, resp.Body)
-			resp.Body.Close()
+			common.Logf("invalid response from domain: %d", resp.Status)
+			drainResponseBody(resp)
 		} else {
 			common.Logf("invalid response from domain: %v", err)
 		}
@@ -377,4 +368,31 @@ func privateToPublicDERBase64(pk *rsa.PrivateKey) (string, error) {
 	}
 
 	return base64.StdEncoding.EncodeToString(publicBytes), nil
+}
+
+func drainResponseBody(response *http.Response) {
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+}
+
+func buildTokenURL(host string) (string, error) {
+	base := strings.TrimSpace(host)
+	if base == "" {
+		return "", fmt.Errorf("empty host")
+	}
+	// Default to https if no scheme provided
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid host base URL: %q", host)
+	}
+
+	u.Path, err = url.JoinPath(u.EscapedPath(), "oauth2", "v1", "token")
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+
 }
