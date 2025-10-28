@@ -98,7 +98,7 @@ func (kp *tokenExchangeKeyProvider) KeyID() (string, error) {
 
 // tokenExchangeFederationClient implements federationClient
 type tokenExchangeFederationClient struct {
-	httpClient    *http.Client
+	httpClient    common.HTTPRequestDispatcher
 	securityToken securityToken
 	privateKey    *rsa.PrivateKey
 	tokenIssuer   TokenIssuer
@@ -110,7 +110,7 @@ type tokenExchangeFederationClient struct {
 // UpdateHTTPClient updates the http.Client so clients with different transports,
 // timeouts, etc. can be used. Locks mutex during update to prevent race conditions.
 // Safe for concurrent use.
-func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c *http.Client) error {
+func (fc *tokenExchangeFederationClient) UpdateHTTPClient(c common.HTTPRequestDispatcher) error {
 	if c == nil {
 		return fmt.Errorf("invalid *http.Client")
 	}
@@ -226,7 +226,8 @@ type tokenExchangeToken struct {
 }
 
 // newTokenExchangeToken assembles and returns a tokenExchangeToken issued by OCI
-func newTokenExchangeToken(client *http.Client, jwt, publicKey, host, authCode string) (tokenExchangeToken, error) {
+func newTokenExchangeToken(client common.HTTPRequestDispatcher, jwt, publicKey string,
+	host, authCode string) (tokenExchangeToken, error) {
 	var t tokenExchangeToken
 	var err error
 

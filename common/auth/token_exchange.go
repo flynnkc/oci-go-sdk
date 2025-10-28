@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -16,7 +15,7 @@ import (
 // and allows injecting a custom *http.Client for outbound requests.
 type ConfigurationProviderWithHTTPClient interface {
 	ConfigurationProviderWithClaimAccess
-	SetHTTPClient(*http.Client) error
+	SetHTTPClient(common.HTTPRequestDispatcher) error
 }
 
 // TokenExchangeConfigurationProvider provides OCI configuration via token exchange,
@@ -143,6 +142,6 @@ func (c TokenExchangeConfigurationProvider) AuthType() (common.AuthConfig, error
 
 // SetHTTPClient allows a provided http.Client to be used so timeouts, transport
 // and other features can be set as required
-func (c *TokenExchangeConfigurationProvider) SetHTTPClient(h *http.Client) error {
+func (c *TokenExchangeConfigurationProvider) SetHTTPClient(h common.HTTPRequestDispatcher) error {
 	return c.keyProvider.federationClient.UpdateHTTPClient(h)
 }
